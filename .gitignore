@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+balanced_out/
+*.bak
+Data/
