@@ -45,7 +45,7 @@ def main():
             return ((ms[hi] if hi < len(ms) else name), fid & 0xFFFFFF)
         return full, cost, key
 
-    def snapshot(buf, res, full, cost, key):
+    def snapshot(buf, res, full, cost, key, tomes):
         out = {}
         for r in S.iter_top_records(buf, {b'SPEL'}):
             if r.comp: continue
@@ -67,6 +67,8 @@ def main():
             else:
                 cat = 'non-damage'; sc = 0.0
             if k in cost and cat != 'non-damage': cat = 'cloak/proc'
+            elif cat != 'non-damage' and r.formid not in tomes:
+                cat += ' (npc)'   # no tome in the pack: NPC/summon/proc spell, not the design's player line
             out[r.formid] = (sp['edid'], cat, tier, sp['cost'], sc)
         return out
 
@@ -77,13 +79,16 @@ def main():
         return (f"n={len(rs):3}  med x{statistics.median(rs):5.2f}  p10 x{pct(rs,0.10):5.2f}  "
                 f"p90 x{pct(rs,0.90):5.2f}  within25% {100*w//len(rs):3}%")
 
-    CATS = ['burst','per-target DoT','conc','field/hazard','rune','cloak/proc','non-damage','SKIP:hazard']
+    CATS = ['burst','per-target DoT','conc','field/hazard','rune',
+            'burst (npc)','per-target DoT (npc)','conc (npc)','field/hazard (npc)','rune (npc)',
+            'cloak/proc','non-damage','SKIP:hazard']
     for pl in PLUGS:
         buf = open(pl, 'rb').read()
         res = B.build_resolver(S.masters(buf), S.read_mgef_map(buf), v)
         out = B.balance_plugin(pl, curve, ceil, fit, v, knobs)[0]
         full, cost, key = skipsets(buf, os.path.basename(pl))
-        A = snapshot(buf, res, full, cost, key); Z = snapshot(out, res, full, cost, key)
+        tomes = S.read_tome_spells(buf)
+        A = snapshot(buf, res, full, cost, key, tomes); Z = snapshot(out, res, full, cost, key, tomes)
         dmg = collections.defaultdict(list); cst = collections.defaultdict(list)
         conc_t = collections.defaultdict(lambda: ([], [])); movers = []
         for fid, (ed, cat, tier, c0, s0) in A.items():
@@ -98,7 +103,8 @@ def main():
         print(f"\n=== {os.path.basename(pl)} ===")
         print(f"{'category':16} {'DAMAGE ratio':>52}     {'COST ratio':>52}")
         for cat in CATS:
-            print(f"  {cat:15} {line(dmg.get(cat, [])):>52}     {line(cst.get(cat, [])):>52}")
+            if cat not in dmg and cat not in cst: continue
+            print(f"  {cat:19} {line(dmg.get(cat, [])):>50}     {line(cst.get(cat, [])):>50}")
         if conc_t:
             print("  conc by tier:  " + "   ".join(
                 f"{t[:3]} dmg x{statistics.median(d):.2f}/cost x{statistics.median(c):.2f}(n{len(c)})"
