@@ -103,7 +103,7 @@ COST_CEIL_HEADROOM = 1.5            # soft cost clamp = vanilla tier max cost * 
 # equal-cost burst as compensation:  total = burst_target * dur^(1-DOT_EXP)
 #   1.00 -> no compensation: equal magicka buys equal TOTAL damage, however slowly it lands
 #   0.70 -> a 10s DoT gets 2.0x a burst's total, a 30s DoT 2.7x
-#   0.50 -> a 10s DoT gets 3.2x, a 30s DoT 5.5x
+#   0.60 -> a 10s DoT gets 2.5x, a 30s DoT 3.9x
 # Concentration and burst spells are unaffected by it.
 #
 # This is the ONE number in the model asserted rather than measured, because no baseline can
@@ -114,11 +114,15 @@ COST_CEIL_HEADROOM = 1.5            # soft cost clamp = vanilla tier max cost * 
 # reading the samples, and do not wire it back in as the driver: a per-list fit would make a
 # universal tool inherit whatever junk each baseline happens to contain.
 #
-# 0.70 is where Mysticism's own poison line sits, i.e. it makes Mysticism reproduce itself at
-# x1.00 under the self-consistency test. Poison is the most situational damage type in the game
-# (resisted; immune on undead and automatons), so treat 0.70 as the GENEROUS end -- a fire DoT
-# arguably deserves less compensation, which means a higher number.
-DOT_EXP_DEFAULT = 0.70
+# 0.60 is where Mysticism's own poison line sits against the honest tome-corpus curve, i.e. it
+# makes Mysticism's DoTs reproduce at x1.00 under the self-consistency test. (The old default of
+# 0.70 was the same calibration run against a curve inflated by trap/hazard junk.) Poison is the
+# most situational damage type in the game (resisted; immune on undead and automatons), so treat
+# 0.60 as the GENEROUS end -- a fire DoT arguably deserves less compensation, a higher number.
+# Known residual, unmeasurable from any vanilla baseline (zero corpus DoTs): Mysticism prices its
+# DoTs ~25-30% more score-efficient than its bursts, so no single exponent reproduces its damage
+# AND its cost at once; 0.60 reproduces damage exactly and leaves DoT costs ~x0.76 (generous).
+DOT_EXP_DEFAULT = 0.60
 FIELD_EXPOSE    = 4.0    # seconds a target is realistically inside a wall/hazard/aura
 MIN_N           = 3      # baseline samples a (class,tier) cell needs before it is trusted
 MIN_DOT_N       = 6      # baseline DoT samples needed before the DIAGNOSTIC rate is shown
@@ -493,8 +497,11 @@ def build_vanilla_model(van_low3, van_paths, order_paths=None):
     else:
         cvec=[curve['aimed'][i]*(FALLBACK['conc'][i]/FALLBACK['fnf'][i]) for i in range(5)]
         print("  conc dps line: default shape (corpus has no concentration damage spells)")
-    # sustained dps cannot outbuy an equal-tier burst's whole payout every second
-    curve['conc']=[round(min(cvec[i], P[i]),2) for i in range(5)]
+    # sustained dps cannot outbuy an equal-tier burst's whole payout every second -- but only a
+    # SAMPLED aimed cell can veto (Requiem really does sell 16 dps conc at Novice, and the Novice
+    # aimed cell is always empty/extrapolated, so an extrapolation must not trim a measured anchor)
+    curve['conc']=[round(min(cvec[i], P[i]) if per[('aimed',TIERS[i])] else cvec[i], 2)
+                   for i in range(5)]
     for a in curve:                      # sampled + derived cells must not disagree in direction
         for i in range(1,5):
             if curve[a][i] < curve[a][i-1]: curve[a][i]=curve[a][i-1]
