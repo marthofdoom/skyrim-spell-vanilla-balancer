@@ -14,11 +14,11 @@ Example (Simonrim list, verifying its own overhaul):
   python3 verify.py "<list>/Stock Game/Data" "<list>/mods" "<list>/profiles/Default/loadorder.txt" \
       "<list>/mods/Mysticism - A Magic Overhaul/MysticismMagic.esp"
 
-What to expect on the baseline's own overhaul:
-  burst / conc damage AND cost medians x1.00; conc per-tier ~1.00; rune cost ~1.00 (rune damage
-  reads the vanilla rune premium against the pack's own); DoT damage x1.00 with cost ~x0.76 (the
-  DoT efficiency premium is unmeasurable -- see DOT_EXP in spell_balance.py); non-damage,
-  cloak/proc and SKIP:hazard rows exactly x1.00 (untouched).
+What to expect on the baseline's own overhaul (measured at (DOT_EXP, DOT_COST_BACK)=(0.75,0.40)):
+  burst / conc damage AND cost medians x1.00; conc per-tier cost <= ~1.09; rune cost ~1.00 (rune
+  damage reads the vanilla rune premium against the pack's own, ~x1.3); tome DoT damage x1.00 and
+  cost ~x1.01 (whole-bucket medians move with the pack's creature/NPC spells, which are repriced
+  by design); non-damage, cloak/proc and SKIP:hazard rows exactly x1.00 (untouched).
 """
 import sys, os, io, contextlib, statistics, collections, math
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
