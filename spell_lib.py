@@ -158,8 +158,19 @@ def read_mgef_map(buf):
             'av':struct.unpack_from('<i',db,MGEF_OFF_AV)[0] if len(db)>=MGEF_OFF_AV+4 else -1}
     return out
 def is_damage(m):
-    """True if MGEF m is a hostile Health-modifying (damage) effect."""
-    return bool(m) and (m['flags'] & MGEF_HOSTILE) and m['av']==AV_HEALTH
+    """True if MGEF m is a hostile Health-modifying (damage) effect that the engine
+    actually PRICES.
+
+    basecost == 0 is the discriminator for riders. Vanilla's PerkDisintegrate* effects are
+    hostile Health effects with magnitude 200 and duration 1, but base cost 0 -- they are the
+    shock perk's "disintegrate below 10% health" flag, not damage. Counting them wrecks the
+    model twice over: Sparks reads 208 damage instead of 8, and every shock spell (Sparks,
+    Lightning Bolt, Chain Lightning, Thunderbolt, Wall of Storms, Lightning Storm) is
+    misclassified as a damage-over-time spell because of the rider's duration. By the engine's
+    own cost formula a zero-base-cost effect contributes nothing, so it is not damage here
+    either. Mod-added script/flag riders follow the same convention.
+    """
+    return bool(m) and (m['flags'] & MGEF_HOSTILE) and m['av']==AV_HEALTH and m['basecost']>0
 
 SCHOOL_AV = {18:'Alteration',19:'Conjuration',20:'Destruction',21:'Illusion',22:'Restoration'}
 def tier_of(min_skill):
