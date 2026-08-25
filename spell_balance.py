@@ -82,8 +82,6 @@ TIER_MAG  = {'Novice':100,'Apprentice':100,'Adept':100,'Expert':100,'Master':100
 VARIETY   = 0.35
 COST_CEIL_HEADROOM = 1.5            # soft cost clamp = vanilla tier max cost * this
 
-COST_EXP  = 1.1                     # autocalc magnitude exponent, fit to Skyrim.esm
-
 # --- THE EXCHANGE RATE: equal magicka buys equal damage, within a tier --------------------
 # The single assumption that makes every delivery style commensurable, and what removes the need
 # for DoT samples in any tier. A spell is bought with magicka and paid out in damage; at a given
@@ -142,6 +140,23 @@ FALLBACK = {'fnf':[15,30,45,60,90], 'conc':[8,11,14,18,40]}
 def spell_class(castType):
     return 'conc' if castType==2 else 'fnf'
 
+# Delivery families for PRICING. The one exchange rate held per tier only as long as every fnf
+# spell was priced on the same pooled median -- but the vanilla design prices delivery itself:
+# an aimed bolt buys ~0.5 damage/magicka at Apprentice while a rune buys ~0.19 and Firestorm 0.07.
+# Pooling them made each family's cost drift toward the tier mix. Each family's level is MEASURED
+# from the baseline (medians / pooled ratios; concentration gets the same two-anchor line as its
+# damage ratio) -- no per-list constants.
+SUBCATS = ['aimed','loc','self','conc']
+def subcat(castType, delivery):
+    """aimed = lands on a target you point at (2=Aimed, 3=TargetActor), the dense family;
+    loc = placed at a location (4=TargetLocation: runes, placed fields);
+    self = area around the caster (0=Self, 1=Contact: Firestorm, novas);
+    conc = concentration, priced per second."""
+    if castType==2: return 'conc'
+    if delivery==4: return 'loc'
+    if delivery in (0,1): return 'self'
+    return 'aimed'
+
 # Deliveries where the effect creates a FIELD (a wall, a hazard, a cloak, a self-aura) rather
 # than landing on one target. Their recorded duration is how long the FIELD persists, not how
 # long anything is being damaged -- a Wall of Fire burns for 10s but a target walks through it
@@ -162,17 +177,6 @@ def dur_eff(dur, delivery=None, exp=None):
     d = max(dur, 1.0)
     if delivery in FIELD_DELIVERY: d = min(d, FIELD_EXPOSE)
     return d ** e
-
-AUTOCALC_DUR_DIV = 10.0   # Bethesda's own divisor; NOT our exchange rate -- see DOT_EXP
-def vanilla_cost(effs):
-    """Bethesda's autocalc formula, fit to Skyrim.esm (median error 0%). Only used for spells
-    with no damage at all, where there is no damage payout to price against."""
-    tot = 0.0
-    for m, e in effs:
-        if not m: continue
-        bc=m['basecost']; mag=max(e['mag'],1.0); dur=e['dur']
-        tot += bc*(mag**COST_EXP)*(max(dur/AUTOCALC_DUR_DIV,1.0) if dur>0 else 1.0)
-    return tot
 
 def classify_tier(effs):
     valid=[m for m,e in effs if m]
@@ -277,10 +281,25 @@ def resolve_order(order_file, data_dir, mods_dir=None):
         if cand and os.path.exists(cand): out.append(cand)
     return out
 
-def effective_vanilla_spells(order_paths, van_low3):
+def nocast_keys(buf, own_name, masters=None):
+    """Structural 'nobody casts this' markers of one plugin, as (plugin_name, low3) keys:
+    full-skip = spells applied BY a hazard field (HAZD payloads -- walls, blizzards, gas, traps);
+    cost-skip = cloak/proc payloads (MGEF associated items): their damage is honest (an enemy in
+    the field really takes it) but their magicka cost is a token the engine never charges."""
+    if masters is None: masters=S.masters(buf)
+    def key(fid):
+        hi=fid>>24
+        return ((masters[hi] if hi<len(masters) else own_name), fid & 0xFFFFFF)
+    full={key(f) for f in S.read_hazard_payloads(buf)}
+    cost={key(f) for f in S.read_mgef_assoc(buf)}
+    return full, cost
+
+def effective_vanilla_spells(order_paths, van_low3, nocast=None):
     """{vanilla_low3: (parsed_spel, mgef_resolver)} for every vanilla SPEL that a later plugin
     OVERRIDES. Later plugins win, so this yields the list's ACTUAL baseline (e.g. Requiem's
-    rescaled vanilla spells) rather than unmodded Skyrim.esm values."""
+    rescaled vanilla spells) rather than unmodded Skyrim.esm values.
+    nocast, if given, is a (full_set, cost_set) pair that each order plugin's own hazard/cloak
+    payload keys are accumulated into (see nocast_keys)."""
     winners={}
     for path in order_paths:
         try: buf=open(path,'rb').read()
@@ -288,6 +307,9 @@ def effective_vanilla_spells(order_paths, van_low3):
         try: masters=S.masters(buf)
         except Exception: continue
         own=S.read_mgef_map(buf)
+        if nocast is not None:
+            f,c=nocast_keys(buf, os.path.basename(path), masters)
+            nocast[0]|=f; nocast[1]|=c
         # F5: let this plugin's MGEF overrides win in any map already held, so an overhaul that
         # re-costs/re-tiers vanilla magic effects is visible to the baseline (Simonrim does).
         # And publish its OWN new MGEFs under the plugin's name, so a later plugin's (or a
@@ -331,6 +353,7 @@ def fit_dot_exp(base):
         if sp['type']!=0 or sp['spit_off'] is None or sp['cost']<=0: continue
         effs=[(res_i(e['mgef']),e) for e in sp['effects']]
         if not has_damage(effs): continue
+        if any(S.is_damage(m) and m.get('cond') for m,e in effs): continue
         t=TI[classify_tier(effs)]
         if is_per_target_dot(sp, effs):
             dots.append((t,[(e['mag'],e['dur']) for m,e in effs if S.is_damage(m) and e['mag']>0],sp['cost']))
@@ -358,203 +381,188 @@ def build_vanilla_model(van_low3, van_paths, order_paths=None):
     buf=open(path,'rb').read()
     own=S.read_mgef_map(buf)
     res=build_resolver([CURVE_MASTER], own, van_low3)
-    per=collections.defaultdict(list)          # (cls,tier)->[score]
-    conc_ids=collections.defaultdict(list)     # tier->[edid], to name thin conc anchors
-    costs=collections.defaultdict(list)        # (tier,'conc'|'fnf')->[cost]
-    eff_rows=[]                                # (cls, tier, score, cost) for the efficiency fit
-    dotmix=collections.defaultdict(lambda:[0,0])  # tier->[n_burst, n_dot], diagnostics only
+    # ---- structural no-cast sets (hazard payloads / cloak payloads), vanilla-wide -------------
+    # Collected from every vanilla master and every order plugin, keyed (plugin, low3) so a pack's
+    # override of e.g. vanilla HazardWallofFireSpell is recognized no matter which file wins it.
+    nocast=[set(), set()]
+    for n in VANILLA_MASTERS:
+        p=os.path.join(VANILLA_DATA, n)
+        if not os.path.exists(p): continue
+        b=buf if n==CURVE_MASTER else open(p,'rb').read()
+        f,c=nocast_keys(b, n)
+        nocast[0]|=f; nocast[1]|=c
+    # ---- the corpus: spells the design SELLS ---------------------------------------------------
+    # Only tome-taught spells describe the baseline economy. The rest of the damage-spell pool --
+    # traps, hazard payloads, creature attacks, shout and quest spells -- carries costs the engine
+    # never charges a player (crChaurusPoisonSpit02: 49 damage for 3 magicka) and at some tiers it
+    # is the ENTIRE pool: vanilla's Novice fnf cell is 100% traps/hazards/spit, zero player spells.
+    # A spell tome is the structural marker for "priced by the design": every vanilla player spell
+    # has one, no trap/hazard/creature spell does.
+    tomes={f & 0xFFFFFF for f in S.read_tome_spells(buf)}
     base={}
     for r in S.iter_top_records(buf,{b'SPEL'}):
         base[r.formid & 0xFFFFFF]=(S.parse_spel(r.data), res)
+    n_all=sum(1 for fid,(sp,_) in base.items()
+              if sp['type']==0 and sp['spit_off'] is not None)
     n_over=0
     if order_paths:
-        for fid,(sp2,res2) in effective_vanilla_spells(order_paths, van_low3).items():
+        for fid,(sp2,res2) in effective_vanilla_spells(order_paths, van_low3, nocast).items():
             if fid in base: base[fid]=(sp2,res2); n_over+=1
-        print(f"baseline: {len(base)} vanilla spells, {n_over} overridden by the load order")
+    corpus={fid:v for fid,v in base.items() if fid in tomes}
+    print(f"baseline: {len(base)} vanilla spells ({n_over} overridden by the load order), "
+          f"corpus = {len(corpus)} tome-taught player spells")
     dot_exp = DOT_EXP_OVERRIDE if DOT_EXP_OVERRIDE is not None else DOT_EXP_DEFAULT
     src = "--dot-exp" if DOT_EXP_OVERRIDE is not None else "default"
-    implied, n_dot, ok = fit_dot_exp(base)
-    hint = (f"baseline's own {n_dot} per-target DoTs imply {implied}" if ok
-            else f"baseline has only {n_dot} per-target DoTs, cannot imply one")
+    implied, n_dot, ok = fit_dot_exp(corpus)
+    hint = (f"corpus's own {n_dot} per-target DoTs imply {implied}" if ok
+            else f"corpus has only {n_dot} per-target DoTs, cannot imply one")
     print(f"  DoT delay-compensation rate: {dot_exp} ({src}); {hint}")
-    for sp,res_i in base.values():
+    # ---- corpus rows, by delivery family -------------------------------------------------------
+    per=collections.defaultdict(list)          # (sub,tier)->[score]
+    eff=collections.defaultdict(list)          # (sub,tier)->[score/cost]
+    conc_ids=collections.defaultdict(list)     # tier->[edid], to name thin conc anchors
+    costs=collections.defaultdict(list)        # (tier,'conc'|'fnf')->[cost] for the ceiling
+    n_cond=0
+    for sp,res_i in corpus.values():
         if sp['type']!=0 or sp['spit_off'] is None: continue
         effs=[(res_i(e['mgef']),e) for e in sp['effects']]
         if not has_damage(effs): continue
-        tier=classify_tier(effs); cls=spell_class(sp['castType'])
+        tier=classify_tier(effs)
         V=score(effs, sp['castType'], sp['delivery'], dot_exp)
-        if V<=0: continue
-        # A cost-0 record is not a spell anyone casts and pays for -- it is the damage component
-        # of a cloak, a proc or a scripted ability, priced (if at all) by its parent. It cannot
-        # contribute an efficiency, and it must not define the damage curve either: vanilla has 13
-        # of them and packs are up to 78% them, all sitting at whatever magnitude their parent
-        # wanted. Only priced spells describe the baseline's economy.
-        if sp['cost']<=0: continue
-        per[(cls,tier)].append(V)
-        if cls=='conc': conc_ids[tier].append(sp['edid'])
-        if cls=='fnf':      # diagnostics: how much of the fnf pool is over-time
-            dotmix[tier][1 if max(e['dur'] for m,e in effs if S.is_damage(m) and e['mag']>0)>0 else 0]+=1
-        costs[(tier,cls)].append(sp['cost'])
-        eff_rows.append((cls,tier,V,sp['cost']))
-    curve={}
-    for a in CLASSES:
-        cnt=[len(per[(a,t)]) for t in TIERS]
-        vt={TI[t]: statistics.median(per[(a,t)]) for t in TIERS if len(per[(a,t)])>=MIN_N}
-        if a=='conc':
-            # Placeholder only. The conc curve is REPLACED below by k x the fnf curve, so its
-            # sparse tiers never have to be guessed at -- report the counts and move on.
-            curve[a]=smooth_fill(vt, FALLBACK[a]) if vt else list(FALLBACK[a])
-            print(f"  samples {a}: {cnt}  (curve derived from fnf, see the ratio below)")
-            continue
-        if len(vt)>=2:
-            curve[a]=smooth_fill(vt, FALLBACK[a])
-            note=""
-        else:
-            # Fewer than 2 sampled tiers cannot define a slope, and smooth_fill would extrapolate
-            # FLAT from the single point -- a curve that does not rise with tier, which is never
-            # right and badly over-nerfs high-tier spells. Keep the vanilla SHAPE and anchor it
-            # to whatever level we did observe.
-            fb=FALLBACK[a]
-            if vt:
-                i,v=next(iter(vt.items())); k=(v/fb[i]) if fb[i] else 1.0
-                curve[a]=[round(x*k,2) for x in fb]
-                note=f"  -> only tier {i} sampled; vanilla shape anchored x{k:.2f}"
-            else:
-                curve[a]=list(fb); note="  -> no samples; vanilla fallback shape"
-        print(f"  samples {a}: {cnt}{note}")
-    print(f"  (fnf pool is burst+DoT on one curve: burst={[dotmix[t][0] for t in TIERS]} "
-          f"dot={[dotmix[t][1] for t in TIERS]}; DoTs are priced by dur_eff, not by these counts)")
-    # soft cost ceiling per (tier, class): concentration cost is per-SECOND, so its ceiling is
-    # far below a fire-and-forget burst's. Guards against inflated modded effect base-costs.
-    ceil={}
-    for t in TIERS:
-        for cls in CLASSES:
-            c=costs[(t,cls)]
-            ceil[(t,cls)]=max(c)*COST_CEIL_HEADROOM if c else (60 if cls=='conc' else 99999)
-    # ---- cost norm C(t,cls): dense (every spell has a cost) ----
-    C={}
-    for cls in CLASSES:
-        vt={TI[t]: statistics.median(costs[(t,cls)]) for t in TIERS if len(costs[(t,cls)])>=MIN_N}
-        C[cls]=smooth_fill(vt, [c if c else 1 for c in FALLBACK[cls]])
-    # ---- efficiency E(cls,t) = score per magicka, POOLED across classes for the tier slope ----
-    # conc gives dps / cost-per-second, fnf gives instant-equivalent damage / cast cost: same
-    # units, so pooling is dimensionally sound and lets a dense tier slope be estimated instead
-    # of per-cell scraps.
-    by_t=collections.defaultdict(list)
-    for a,t,V,c in eff_rows: by_t[t].append(V/c)
-    et={TI[t]: statistics.median(by_t[t]) for t in TIERS if len(by_t[t])>=MIN_N}
-    base_e=fill_gaps(et, [0.4]*5)
-    # ONE exchange rate per tier, shared by both classes: same tier + same magicka spent =>
-    # same damage delivered, however it is delivered. Not split per class -- a per-class factor
-    # would be fit on the handful of concentration samples a baseline has (vanilla: 1 at Expert)
-    # and would then quietly say that sustained damage is worth less than burst damage at that
-    # rank, which is a balance claim the data is far too thin to make.
-    E={a:[max(base_e[i],1e-6) for i in range(5)] for a in CLASSES}
-    # ---- concentration rides the fnf tier SHAPE, times a measured ratio LINE ----------------
-    # Concentration is as data-starved as DoT was, and for the same structural reason: vanilla has
-    # exactly three player concentration damage spells (Flames/Frostbite/Sparks, all Novice), so
-    # Apprentice and Adept have ZERO samples on every baseline tested. Left per-cell the curve
-    # comes out nearly FLAT (8/9/11/11/11), which crushes any high-tier conc spell a pack adds.
-    #
-    # It does not need per-tier samples. Both classes are bought with the same magicka at the same
-    # rank, so the whole conc curve is the (dense) fnf curve times a conc/fnf ratio -- but that
-    # ratio is NOT one constant: it RISES with tier, and vanilla says so itself (Flames deals 8/s
-    # at Novice, ~0.38 of a Novice burst; Lightning Storm deals 75/s at Master vs Firestorm's 100
-    # burst). Bethesda's own MGEF pricing agrees structurally: the player fnf damage effects'
-    # base cost climbs with tier (FF 25 -> FFAimed75 3.55 -> FFSelfArea100 6.0, which is exactly
-    # why fnf damage-per-magicka falls) while the conc effects' stays flat (FireDamageConcAimed
-    # 1.5 at Novice, ShockDamageMassConcAimed 1.2 at Master) -- so conc keeps its exchange rate
-    # while fnf pays a rising premium, and the damage ratio between them must widen.
-    #
-    # Measured as a geometric line through the only two honest anchors any baseline has:
-    #     k(t) = k_lo * g^(t - lo)   with  g = (k_hi / k_lo)^(1/(hi-lo)),  clamped to [1, 1.5]
-    #   lo = lowest tier with >= MIN_N conc samples (the Novice mass, ~50 spells: intercept)
-    #   hi = highest tier with any conc sample     (the list's winning Lightning Storm: slope)
-    # The INTERIOR sampled cells are deliberately not fit: on every baseline examined they are
-    # the Wall spells and quest walls (Potema), whose SPEL-visible magnitude is only the spray
-    # tip -- the real damage is the hazard the wall leaves, living in HAZD records the SPEL never
-    # references. The engine's own autocalc betrays this: the Barrier effects' base cost is
-    # 12-14.8 vs the 1.2-2.3 every honest conc damage effect carries, i.e. Bethesda priced ~8x
-    # more damage into them than their magnitude shows. Fitting them would flip the slope
-    # negative (walls sit at k=0.13) and re-crush high-tier conc.
-    # The hi cell is usually n=1, and that is accepted: it is Lightning Storm, the only
-    # high-tier player conc spell Bethesda ever shipped, re-valued by whatever overhaul wins it
-    # -- the one real datum for "what the design pays sustained damage at rank". Validated: on a
-    # Mysticism list the fit predicts Adept k=0.49 vs 0.50 in Mysticism's own conc line
-    # (8/20/40 dps at Nov/Ade/Mas). Three guards bound the damage a junk anchor can do: g<1
-    # falls back to the constant (a FALLING ratio is exactly the failure this fit exists to
-    # prevent); g>1.5 is capped just above the steepest legitimate rise observed (unmodded
-    # vanilla, x1.22/tier); and an anchor whose ratio exceeds K_ANCHOR_MAX is rejected outright
-    # (see below). Thin anchors are NAMED in the printout so a junk one can be seen.
-    # NOT inverted from MGEF base costs directly: cost ~ bc*mag^1.1 makes any closed-form for
-    # magnitude a ~10th power of a bc ratio -- analytically hopeless, so bc corroborates the
-    # direction only and the level comes from spells.
-    K_STEP_MAX   = 1.5   # per-tier rise cap: just above the steepest legitimate rise observed (vanilla 1.22)
-    # A conc/fnf ratio above 1 would claim sustained dps outbuys an equal-tier burst's WHOLE
-    # payout every second -- no design does that (vanilla's own maximum is Lightning Storm at
-    # 0.83), so an anchor above it can only be a junk sample (a creature or quest spell the
-    # overhaul re-tiered) and the slope is not trusted. k(t) is also capped here absolutely, so
-    # extrapolation past a sub-Master anchor cannot exceed it either. Costs no real anchor.
-    K_ANCHOR_MAX = 1.0
-    kc=[V/curve['fnf'][TI[t]] for t in TIERS for V in per[('conc',t)] if curve['fnf'][TI[t]]>0]
-    kmed={i: statistics.median([V/curve['fnf'][i] for V in per[('conc',TIERS[i])]])
-          for i in range(5) if per[('conc',TIERS[i])] and curve['fnf'][i]>0}
-    def _anames(i, cap=2):
+        if V<=0 or sp['cost']<=0: continue
+        # Conditional damage (sun/anti-undead: the MGEF carries CTDA conditions) only lands on
+        # some targets, so its magnitude-vs-cost sits far off the unconditional economy (Bane of
+        # the Undead reads 13 score for 868 magicka). Real spells, wrong rows -- excluded.
+        if any(S.is_damage(m) and m.get('cond') for m,e in effs):
+            n_cond+=1; continue
+        sub=subcat(sp['castType'], sp['delivery'])
+        per[(sub,tier)].append(V)
+        eff[(sub,tier)].append(V/sp['cost'])
+        if sub=='conc': conc_ids[tier].append(sp['edid'])
+        costs[(tier, 'conc' if sub=='conc' else 'fnf')].append(sp['cost'])
+    if n_cond: print(f"  ({n_cond} conditional-damage spells excluded from the fit)")
+    for a in SUBCATS:
+        print(f"  samples {a:5}: {[len(per[(a,t)]) for t in TIERS]}")
+    # ---- damage curve: aimed is the dense family; loc/self ride it by a measured ratio ---------
+    # The corpus is all designed player spells, so every sampled cell is trusted (n>=1): at some
+    # tiers the design's ONLY datum is one spell (Firestorm at Master) and dropping it would mean
+    # inventing the cell instead. Empty cells interpolate/extrapolate along the vanilla shape.
+    vt={i: statistics.median(per[('aimed',TIERS[i])]) for i in range(5) if per[('aimed',TIERS[i])]}
+    P=smooth_fill(vt, FALLBACK['fnf'])
+    def pooled_ratio(subs, of):
+        rows=[V/of[i] for sb in subs for i in range(5) for V in per[(sb,TIERS[i])] if of[i]>0]
+        return (statistics.median(rows), len(rows)) if rows else (None, 0)
+    r_loc, n_loc  = pooled_ratio(['loc'],  P)
+    r_self,n_self = pooled_ratio(['self'], P)
+    r_fam, n_fam  = pooled_ratio(['loc','self'], P)   # family fallback: both are placed fields
+    if r_loc  is None: r_loc  = r_fam if r_fam is not None else 1.0
+    if r_self is None: r_self = r_fam if r_fam is not None else 1.0
+    curve={'aimed': P,
+           'loc':  [round(x*r_loc, 2) for x in P],
+           'self': [round(x*r_self,2) for x in P]}
+    print(f"  loc/aimed damage ratio {r_loc:.2f} (n={n_loc}), self/aimed {r_self:.2f} (n={n_self})")
+    # ---- concentration: an absolute two-anchor geometric line through the design's own dps ----
+    # Vanilla ships player conc damage at exactly two tiers: the Novice line (Flames/Frostbite/
+    # Sparks) and Lightning Storm at Master -- and every overhaul re-prices those same spells. The
+    # conc curve is the geometric line through those two anchors: conc(t) = lo * g^(t-lo_tier).
+    # It is NOT expressed as a ratio of the aimed curve any more: the aimed Novice cell is always
+    # EMPTY (vanilla sells no Novice fnf damage spell), and an intercept ratio taken against an
+    # extrapolated denominator poisoned the whole line. Interior sampled cells are still
+    # deliberately not fit: on every baseline examined they are the Wall spells, whose
+    # SPEL-visible magnitude is only the spray tip (the real damage is the HAZD the wall leaves).
+    # Validated: on a Mysticism list the line predicts Adept 18 dps vs the author's own 20.
+    G_CONC_MAX = 2.0     # per-tier rise cap; vanilla's own line is x1.75/tier (8 -> 75)
+    kmed={i: statistics.median(per[('conc',TIERS[i])])
+          for i in range(5) if per[('conc',TIERS[i])]}
+    def _anames(i, cap=3):
         n=conc_ids.get(TIERS[i], [])
         return " ["+", ".join(x or '?' for x in n)+"]" if 0<len(n)<=cap else ""
-    kt=None
-    if len(kc)>=MIN_N:
-        lo=min((i for i in kmed if len(per[('conc',TIERS[i])])>=MIN_N), default=None)
-        hi=max(kmed) if kmed else None
-        # Fallback constant: the LOW-tier mass median, not the whole pool. The interior cells
-        # (walls) understate their real damage -- the same contamination the fit above excludes
-        # -- and on a wall-heavy baseline they drag a pooled median well below the honest level.
-        k_conc=kmed[lo] if lo is not None else statistics.median(kc)
-        if lo is not None and hi is not None and hi>lo and kmed[hi]<=K_ANCHOR_MAX:
-            g=(kmed[hi]/kmed[lo])**(1.0/(hi-lo))
-            if g>1.0:
-                g=min(g, K_STEP_MAX)
-                kt=[min(kmed[lo]*g**(i-lo), K_ANCHOR_MAX) for i in range(5)]
-                print(f"  conc/fnf ratio: rises {kmed[lo]:.3f} ({TIERS[lo][:3]}, "
-                      f"n={len(per[('conc',TIERS[lo])])}) -> {kt[hi]:.3f} "
-                      f"({TIERS[hi][:3]}, n={len(per[('conc',TIERS[hi])])}{_anames(hi)}), "
-                      f"x{g:.3f}/tier; k(t)={[round(x,3) for x in kt]}")
-            else:
-                print(f"  conc/fnf ratio: {k_conc:.3f} constant ({len(kc)} conc spells; top-tier "
-                      f"anchor {TIERS[hi][:3]}={kmed[hi]:.3f}{_anames(hi)} does not rise above "
-                      f"{TIERS[lo][:3]}={kmed[lo]:.3f}, slope not applied)")
-        elif lo is not None and hi is not None and hi>lo:
-            print(f"  conc/fnf ratio: {k_conc:.3f} constant (top-tier anchor {TIERS[hi][:3]}="
-                  f"{kmed[hi]:.3f}{_anames(hi)} exceeds {K_ANCHOR_MAX} -- not a plausible player "
-                  f"conc sample, slope not applied)")
+    if kmed:
+        lo=min((i for i in kmed if len(per[('conc',TIERS[i])])>=MIN_N), default=min(kmed))
+        hi=max(kmed)
+        if hi>lo and kmed[hi]>kmed[lo]:
+            g=min((kmed[hi]/kmed[lo])**(1.0/(hi-lo)), G_CONC_MAX)
+            cvec=[kmed[lo]*g**(i-lo) for i in range(5)]
+            print(f"  conc dps line: {kmed[lo]:.1f} ({TIERS[lo][:3]}, "
+                  f"n={len(per[('conc',TIERS[lo])])}{_anames(lo)}) -> {cvec[hi]:.1f} "
+                  f"({TIERS[hi][:3]}, n={len(per[('conc',TIERS[hi])])}{_anames(hi)}), x{g:.2f}/tier")
         else:
-            print(f"  conc/fnf ratio: {k_conc:.3f} constant, measured from {len(kc)} conc spells "
-                  f"(no second sampled tier to slope from)")
+            cvec=[kmed[lo]]*5
+            print(f"  conc dps line: {kmed[lo]:.1f} constant ({TIERS[lo][:3]} anchor; "
+                  f"no higher-tier rise to slope from)")
     else:
-        k_conc=statistics.median([FALLBACK['conc'][i]/FALLBACK['fnf'][i] for i in range(5)])
-        print(f"  conc/fnf ratio: {k_conc:.3f} (default; baseline has {len(kc)} concentration spells)")
-    curve['conc']=[round(curve['fnf'][i]*(kt[i] if kt else k_conc),2) for i in range(5)]
-    # any remaining sparse fnf cell: fill from the DENSE data (cost norm x efficiency).
-    # ORDER MATTERS: this must stay AFTER the conc derivation above. kmed's denominators and the
-    # k x fnf multiplication use the same pre-fill fnf curve, which is what makes the hi anchor
-    # self-reproducing (kt[hi]*fnf[hi] == the observed conc median, e.g. vanilla Master conc = 75
-    # = Lightning Storm itself). Filling fnf first would silently detune the anchor.
-    for i in range(5):
-        if len(per[('fnf',TIERS[i])])<MIN_N:
-            curve['fnf'][i]=round(C['fnf'][i]*E['fnf'][i],2)
-    for a in CLASSES:                    # sampled + derived cells must not disagree in direction
+        cvec=[curve['aimed'][i]*(FALLBACK['conc'][i]/FALLBACK['fnf'][i]) for i in range(5)]
+        print("  conc dps line: default shape (corpus has no concentration damage spells)")
+    # sustained dps cannot outbuy an equal-tier burst's whole payout every second
+    curve['conc']=[round(min(cvec[i], P[i]),2) for i in range(5)]
+    for a in curve:                      # sampled + derived cells must not disagree in direction
         for i in range(1,5):
             if curve[a][i] < curve[a][i-1]: curve[a][i]=curve[a][i-1]
-    print(f"  damage per magicka by tier (shared by every delivery style): "
-          f"{[round(x,3) for x in E['fnf']]}")
-    return curve, ceil, {'C':C, 'E':E, 'dot_exp':dot_exp}
+    # ---- efficiency per family: what a magicka buys depends on HOW the damage arrives ----------
+    # aimed: dense, per-tier medians. loc/self: aimed times a pooled measured ratio (runes and
+    # self-areas run ~0.3x aimed efficiency in vanilla; overhauls move it, so it is re-measured).
+    # conc: the same two-anchor line as its damage ratio -- the Novice conc mass sets the level,
+    # the list's winning Lightning Storm sets the slope, and the interior wall cells (whose
+    # SPEL-visible magnitude hides the hazard damage) are deliberately not fit. This replaces the
+    # single shared exchange rate, which priced a Master conc spell against burst efficiency and
+    # over-charged it ~2.5x into the cost ceiling.
+    et={i: statistics.median(eff[('aimed',TIERS[i])]) for i in range(5) if eff[('aimed',TIERS[i])]}
+    E_aimed=fill_gaps(et, [0.4]*5)
+    def pooled_eff_ratio(subs):
+        rows=[e/E_aimed[i] for sb in subs for i in range(5)
+              for e in eff[(sb,TIERS[i])] if E_aimed[i]>0]
+        return statistics.median(rows) if rows else None
+    er_loc=pooled_eff_ratio(['loc']); er_self=pooled_eff_ratio(['self'])
+    er_fam=pooled_eff_ratio(['loc','self'])
+    if er_loc  is None: er_loc  = er_fam if er_fam is not None else 1.0
+    if er_self is None: er_self = er_fam if er_fam is not None else 1.0
+    emed={i: statistics.median(eff[('conc',TIERS[i])]) for i in range(5) if eff[('conc',TIERS[i])]}
+    if emed:
+        elo=min((i for i in emed if len(eff[('conc',TIERS[i])])>=MIN_N), default=min(emed))
+        ehi=max(emed)
+        if ehi>elo:
+            ge=(emed[ehi]/emed[elo])**(1.0/(ehi-elo))
+            ge=min(max(ge, 1.0/1.5), 1.5)   # clamp: efficiency drift per tier bounded like the damage line
+            E_conc=[emed[elo]*ge**(i-elo) for i in range(5)]
+            print(f"  conc dps-per-magicka/s: {emed[elo]:.3f} ({TIERS[elo][:3]}) -> "
+                  f"{E_conc[ehi]:.3f} ({TIERS[ehi][:3]}{_anames(ehi)}), x{ge:.3f}/tier")
+        else:
+            E_conc=[emed[elo]]*5
+            print(f"  conc dps-per-magicka/s: {emed[elo]:.3f} constant (one sampled tier)")
+    else:
+        E_conc=list(E_aimed)
+        print("  conc dps-per-magicka/s: NO conc samples -- falling back to aimed efficiency")
+    E={'aimed': [max(x,1e-6) for x in E_aimed],
+       'loc':   [max(x*er_loc, 1e-6) for x in E_aimed],
+       'self':  [max(x*er_self,1e-6) for x in E_aimed],
+       'conc':  [max(x,1e-6) for x in E_conc]}
+    print(f"  damage per magicka by tier, aimed: {[round(x,3) for x in E['aimed']]}  "
+          f"(loc x{er_loc:.2f}, self x{er_self:.2f})")
+    # ---- soft cost ceiling per (tier, class), from corpus costs; gaps interpolated -------------
+    ceil={}
+    for cls in ('fnf','conc'):
+        vt_c={i: max(costs[(TIERS[i],cls)])*COST_CEIL_HEADROOM
+              for i in range(5) if costs[(TIERS[i],cls)]}
+        vec=fill_gaps(vt_c, [99999]*5)
+        for i in range(5): ceil[(TIERS[i],cls)]=vec[i]
+    return curve, ceil, {'E':E, 'dot_exp':dot_exp,
+                         'nocast_full':nocast[0], 'nocast_cost':nocast[1]}
 
 def balance_plugin(src, curve, ceil, fit, van_low3, knobs):
     OVR, TC, TM, VAR = knobs
     buf=bytearray(open(src,'rb').read())
     masters=S.masters(buf); own=S.read_mgef_map(buf)
     res=build_resolver(masters, own, van_low3)
-    n_mag=n_cost=n_unpriced=n_comp=0; dmg_ratios=[]
+    # this file's own hazard/cloak payloads, plus the vanilla-wide sets from the model
+    own_name=os.path.basename(src)
+    if own_name.endswith('.bak'): own_name=own_name[:-4]
+    f_own,c_own=nocast_keys(bytes(buf), own_name, masters)
+    skip_full=fit['nocast_full'] | f_own
+    skip_cost=fit['nocast_cost'] | c_own
+    def rec_key(fid):
+        hi=fid>>24
+        return ((masters[hi] if hi<len(masters) else own_name), fid & 0xFFFFFF)
+    n_mag=n_cost=n_unpriced=n_comp=n_haz=0; dmg_ratios=[]
     for r in S.iter_top_records(buf,{b'SPEL'}):
         if r.comp:
             # A zlib-compressed SPEL cannot be edited fixed-width in place: the parsed offsets
@@ -563,16 +571,22 @@ def balance_plugin(src, curve, ceil, fit, van_low3, knobs):
             n_comp+=1; continue
         sp=S.parse_spel(r.data)
         if sp['type']!=0 or sp['spit_off'] is None: continue
+        key=rec_key(r.formid)
+        if key in skip_full:
+            # A hazard payload. Nobody casts it: the wall/blizzard/trap field applies it, its
+            # magicka cost is a token the engine never charges, and its magnitude is tuned to the
+            # field's tick pattern. Not a player spell -- not refit, not repriced. (User decision
+            # 2026-08-24: hazards and traps are excluded entirely.)
+            n_haz+=1; continue
         effs=[(res(e['mgef']),e) for e in sp['effects']]
         tier=classify_tier(effs); cls=spell_class(sp['castType'])
+        sub=subcat(sp['castType'], sp['delivery'])
         # ONE solve for burst, DoT and concentration alike: pin the spell's SCORE to the baseline's
-        # score for its (class, tier), log-blended toward the author by VARIETY, then read cost off
-        # the same relation. A DoT needs no DoT samples and a high-tier concentration spell needs no
-        # high-tier concentration samples -- score() and the conc/fnf ratio convert both onto the
-        # dense fire-and-forget curve, and convert the answer back.
+        # score for its (family, tier), log-blended toward the author by VARIETY, then read cost off
+        # the family's measured efficiency for the tier.
         V0=score(effs, sp['castType'], sp['delivery'], fit['dot_exp'])
         if V0>0:
-            target=curve[cls][TI[tier]]
+            target=curve[sub][TI[tier]]
             Vstar=(target**(1-VAR))*(V0**VAR)                    # log-blend, on the score
             ratio=(Vstar/V0)*(OVR/100)*(TM[tier]/100)            # score is linear in the mags
             dmg_ratios.append(ratio)
@@ -582,19 +596,19 @@ def balance_plugin(src, curve, ceil, fit, van_low3, knobs):
                     if abs(nm-e['mag'])>1e-4:
                         struct.pack_into('<f', buf, r.data_off+e['efit_off'], float(nm)); n_mag+=1
                     e['mag']=nm
-        # A record that already cost 0 is not cast and paid for by the player -- it is the damage
-        # component of a cloak, a proc or a scripted ability, and its parent does the paying. Its
-        # DAMAGE is still real and is pinned above (vanilla's own Flame Cloak sits exactly on the
-        # Novice concentration curve, so the comparison is honest), but writing a magicka cost onto
-        # it would invent a charge the engine never asked for. Leave it at 0.
-        if sp['cost']<=0:
-            if V0>0: n_unpriced+=1
+        # No cost is written when:
+        #   cost == 0        -- a proc/scripted damage component; its parent does the paying.
+        #   cloak payload    -- same family, but authors often stamp a token cost (Whirlwind
+        #                       Cloak's proc costs 2); the damage above is honest (an enemy inside
+        #                       the cloak really takes it), the charge is not.
+        #   no damage payout -- the model prices damage; it has no opinion on utility spells.
+        #                       (The old autocalc path also ZEROED any spell whose effects carry
+        #                       no engine base cost -- Transmute went 261 -> 0.)
+        if sp['cost']<=0 or key in skip_cost or V0<=0:
+            if V0>0 and sp['cost']>0: n_unpriced+=1
             continue
-        if V0>0:
-            vc=(Vstar*(OVR/100)*(TM[tier]/100))/fit['E'][cls][TI[tier]]
-            vc*=(OVR/100)*(TC[tier]/100)
-        else:
-            vc=vanilla_cost(effs)*(OVR/100)*(TC[tier]/100)
+        vc=(Vstar*(OVR/100)*(TM[tier]/100))/fit['E'][sub][TI[tier]]
+        vc*=(OVR/100)*(TC[tier]/100)
         vc=min(vc, ceil[(tier, cls)])
         newcost=max(int(round(vc)),0)
         if newcost!=sp['cost']:
@@ -602,7 +616,7 @@ def balance_plugin(src, curve, ceil, fit, van_low3, knobs):
             struct.pack_into('<I', buf, r.data_off+sp['spit_off']+4, sp['flags']|S.SPIT_FLAG_MANUAL_COST)
             n_cost+=1
     med_ratio=statistics.median(dmg_ratios) if dmg_ratios else 1.0
-    return bytes(buf), med_ratio, n_mag, n_cost, len(dmg_ratios), n_unpriced, n_comp
+    return bytes(buf), med_ratio, n_mag, n_cost, len(dmg_ratios), n_unpriced, n_comp, n_haz
 
 def main():
     global VANILLA_DATA
@@ -632,8 +646,8 @@ def main():
         order_paths=resolve_order(a.order, VANILLA_DATA, a.mods)
         print(f"load order: {len(order_paths)} plugins resolved from {os.path.basename(a.order)}")
     curve, ceil, fit = build_vanilla_model(van_low3, None, order_paths)
-    print("BASELINE score curve by tier (fnf = instant-equivalent damage, conc = damage/sec):")
-    for cl in CLASSES: print(f"  {cl:4}: "+"  ".join(f"{t[:3]}={curve[cl][TI[t]]:.0f}" for t in TIERS))
+    print("BASELINE score curve by tier (aimed/loc/self = instant-equivalent damage, conc = damage/sec):")
+    for cl in SUBCATS: print(f"  {cl:5}: "+"  ".join(f"{t[:3]}={curve[cl][TI[t]]:.0f}" for t in TIERS))
     knobs=(a.overall, TIER_COST, TIER_MAG, a.variety)
     print(f"VARIETY={a.variety} (0=pure vanilla dmg, 1=author dmg)")
     # target list
@@ -651,16 +665,17 @@ def main():
         read_from = src
         if os.path.abspath(src)==os.path.abspath(deploy) and os.path.exists(deploy+'.bak'):
             read_from = deploy+'.bak'
-        out, med_ratio, nm, nc, ndmg, nunp, ncomp = balance_plugin(read_from, curve, ceil, fit, van_low3, knobs)
+        out, med_ratio, nm, nc, ndmg, nunp, ncomp, nhaz = balance_plugin(read_from, curve, ceil, fit, van_low3, knobs)
         open(os.path.join(OUT_DIR, os.path.basename(src)),'wb').write(out)
         if a.deploy and not a.dry:
             if os.path.abspath(src)==os.path.abspath(deploy) and not os.path.exists(deploy+'.bak'):
                 shutil.copy2(deploy, deploy+'.bak')
             open(deploy,'wb').write(out)
         fresh = "" if read_from==src else "  [re-read pristine .bak]"
-        unp = f"  ({nunp} unpriced: damage pinned, cost left 0)" if nunp else ""
+        unp = f"  ({nunp} proc/cloak: damage pinned, token cost kept)" if nunp else ""
+        haz = f"  [{nhaz} hazard/trap payloads skipped]" if nhaz else ""
         cmp_note = f"  [{ncomp} compressed SPEL skipped]" if ncomp else ""
-        print(f"  {name:18} {ndmg:5}  {nm:5} {nc:4}   ×{med_ratio:.2f}{unp}{cmp_note}{fresh}")
+        print(f"  {name:18} {ndmg:5}  {nm:5} {nc:4}   ×{med_ratio:.2f}{haz}{unp}{cmp_note}{fresh}")
         tot_m+=nm; tot_c+=nc
     mode = "DEPLOYED" if (a.deploy and not a.dry) else "dry-run (OUT_DIR only)"
     print(f"\nTOTAL magΔ={tot_m} costΔ={tot_c}  [{mode}]  OVERALL={a.overall} VARIETY={a.variety}")

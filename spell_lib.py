@@ -133,12 +133,27 @@ def parse_spel(data):
 # ---- MGEF ----
 # DATA is large (SSE ~152 bytes). We derive offsets empirically (find_mgef_offsets).
 MGEF_HOSTILE = 0x00000001  # flag bit 0 in MGEF DATA flags
+# Condition functions that gate a damage effect OFF in the base, general case. Engine-level
+# function indices (language- and mod-independent):
+#   560=HasKeyword, 69=GetIsRace, 71=GetInFaction -- "the victim IS an X": sun/anti-undead lines.
+#     Niche damage; it prices a situational tool, not the general economy.
+#   448=HasPerk -- a rider that only exists once a specific perk is taken (Adamant's Burning
+#     Light). Not the spell's own base damage.
+# Only equality-required conditions (cmp '==', value 1.0) count: an EXCLUSION like "victim is not
+# a machine" (Mysticism's frost line) leaves the damage general and is ignored here.
+_VICTIM_CLASS_FN = {560, 69, 71, 448}
 def parse_mgef_raw(data):
-    edid=None; datab=None
+    edid=None; datab=None; vcond=False
     for st, sd, off in read_subrecords(data):
         if st == b'EDID': edid = sd.split(b'\x00',1)[0].decode('cp1252','replace')
         elif st == b'DATA': datab = sd
-    return edid, datab
+        elif st == b'CTDA' and len(sd) >= 12:
+            op = sd[0] >> 5                              # comparison: 0 is '=='
+            fn = struct.unpack_from('<H', sd, 8)[0]
+            val = struct.unpack_from('<f', sd, 4)[0]
+            if fn in _VICTIM_CLASS_FN and op == 0 and val == 1.0:
+                vcond = True
+    return edid, datab, vcond
 
 # MGEF DATA offsets (SSE, 152-byte DATA) — derived empirically from Skyrim.esm:
 MGEF_OFF_FLAGS=0; MGEF_OFF_BASECOST=4; MGEF_OFF_SKILL=12; MGEF_OFF_MINSKILL=40
@@ -148,15 +163,61 @@ def read_mgef_map(buf):
     """{full_formid: {edid,flags,basecost,school,minskill}} for all MGEF in a plugin."""
     out={}
     for r in iter_top_records(buf,{b'MGEF'}):
-        ed,db=parse_mgef_raw(r.data)
+        ed,db,vcond=parse_mgef_raw(r.data)
         if db is None or len(db)<44: continue
-        out[r.formid]={'edid':ed,
+        out[r.formid]={'edid':ed,'cond':vcond,
+            'assoc':struct.unpack_from('<I',db,8)[0] if len(db)>=12 else 0,
             'flags':struct.unpack_from('<I',db,MGEF_OFF_FLAGS)[0],
             'basecost':struct.unpack_from('<f',db,MGEF_OFF_BASECOST)[0],
             'school':struct.unpack_from('<i',db,MGEF_OFF_SKILL)[0],
             'minskill':struct.unpack_from('<i',db,MGEF_OFF_MINSKILL)[0],
             'av':struct.unpack_from('<i',db,MGEF_OFF_AV)[0] if len(db)>=MGEF_OFF_AV+4 else -1}
     return out
+# ---- structural "not a player-cast spell" markers (verified empirically on Skyrim.esm) ----
+# BOOK DATA (16 bytes): 0 flags(u32) 4 teaches(formid|skill) 8 value 12 weight. When the book is a
+# spell tome, offset 4 holds the taught SPEL. 93 of Skyrim.esm's 821 BOOKs hit a SPEL formid there
+# and they are exactly the spell tomes -- no trap/hazard/creature spell has one.
+def read_tome_spells(buf):
+    """FormIDs taught by any BOOK in the plugin (spell tomes). The vanilla design prices exactly
+    the spells it sells -- this is the structural marker for 'a spell the player buys and casts'."""
+    out=set()
+    for r in iter_top_records(buf,{b'BOOK'}):
+        for st,sd,off in read_subrecords(r.data):
+            if st==b'DATA' and len(sd)>=8:
+                out.add(struct.unpack_from('<I',sd,4)[0])
+    return out
+
+# HAZD DATA (40 bytes): offset 24 = the SPEL the hazard applies to actors inside it (verified: all
+# 18 spell hits in Skyrim.esm's 44 HAZD records sit at that offset -- Hazard*, TrapFirePlate*, oil).
+def read_hazard_payloads(buf):
+    """FormIDs of spells applied BY a hazard field (walls, blizzards, gas clouds, fire plates).
+    Nobody casts these and their magicka cost is a token the engine never charges."""
+    out=set()
+    for r in iter_top_records(buf,{b'HAZD'}):
+        for st,sd,off in read_subrecords(r.data):
+            if st==b'DATA' and len(sd)>=28:
+                out.add(struct.unpack_from('<I',sd,24)[0])
+    return out
+
+# MGEF DATA offset 8 = associated item. For Cloak-archetype effects it is the SPEL the cloak
+# applies to nearby targets (verified: 13 hits in Skyrim.esm, all *CloakDmg / charge payloads).
+# For other archetypes it holds non-SPEL forms (summons' NPC_, bound WEAP) -- harmless to collect,
+# a non-SPEL formid never matches a spell record.
+def read_hazd_ids(buf):
+    """FormIDs of the HAZD records themselves. An MGEF whose associated item is one of these is
+    a hazard-SPAWNING effect (walls, blizzards): the spell's visible magnitude is only the spray
+    tip and the real damage lives in the hazard payload -- unmeasurable from the SPEL record."""
+    return {r.formid for r in iter_top_records(buf,{b'HAZD'})}
+
+def read_mgef_assoc(buf):
+    """Associated-item FormIDs of every MGEF in the plugin (cloak damage payloads and the like)."""
+    out=set()
+    for r in iter_top_records(buf,{b'MGEF'}):
+        ed,db,vcond=parse_mgef_raw(r.data)
+        if db is not None and len(db)>=12:
+            out.add(struct.unpack_from('<I',db,8)[0])
+    return out
+
 def is_damage(m):
     """True if MGEF m is a hostile Health-modifying (damage) effect that the engine
     actually PRICES.
