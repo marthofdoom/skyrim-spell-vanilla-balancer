@@ -161,6 +161,14 @@ by an actor, and each gets exactly the treatment its evidence supports:
 - **Cost-0 records** (scripted-ability damage components): as before, damage pinned, no cost
   invented.
 
+A fourth class is left alone for the opposite reason: **conditional-damage spells** (sun,
+anti-undead and vampiric lines — a damage effect gated on the victim's identity or on a caster
+perk, detected structurally via `CTDA` conditions). The corpus fit excludes them because niche
+damage cannot price the general economy; by the same token the general economy cannot price
+*them* — pinning a sun spell to the general curve would just strip the premium its author paid
+for the niche (measured: they sat at median ×0.73 under the general pin). Kept as authored,
+reported per pack.
+
 Spells with **no damage at all** (summons, wards, utility) are left completely untouched now: the
 model prices damage and has no opinion on utility spells. (The old autocalc re-costing path also
 zeroed any spell whose effects carry no engine base cost — Transmute went 261 → 0 magicka.)
@@ -262,7 +270,8 @@ spells the design actually sells**.
 
 - The baseline corpus is tome-taught player spells only. Traps, hazards, creature attacks, shouts
   and quest spells (most of the raw pool; at some tiers all of it) never touch the fit, and
-  conditional (sun/anti-undead) damage is excluded from it too.
+  conditional (sun/anti-undead/vampiric) damage is excluded from it — and kept as authored on
+  the rebalance side, for the same reason in both directions.
 - Hazard payload spells (named by `HAZD` records) are skipped entirely — not refit, not
   re-costed, reported per pack. Cloak/proc payloads keep their token costs; their damage is still
   pinned. Spells with no damage are left untouched (the old autocalc path zeroed some utility
@@ -284,11 +293,17 @@ spells the design actually sells**.
 - In-place re-runs re-read the pristine `.bak`, so tuning never compounds.
 - Compressed SPEL records are skipped and reported instead of risked.
 
-Validated by self-consistency on damage **and cost**: with a Mysticism (Simonrim) list as
-baseline, Mysticism itself reproduces at ×1.00 median damage in every delivery category, and
-×0.97–1.03 median cost per category (burst / DoT / concentration / field / rune), with
-concentration per tier at 1.00 / 1.03 / 1.05 (Novice / Adept / Master) on cost and
-1.00 / 0.93 / 1.00 on damage. Hazard payloads report as skipped instead of re-priced ×4–×21.
+Validated by self-consistency on damage **and cost** (`verify.py`, which runs the real balance
+path and diffs input against output): with a Mysticism (Simonrim) list as baseline, Mysticism's
+own tome-taught player line reproduces at median damage ×1.00 (burst), ×1.02–1.08 (DoT) and
+×1.00 (concentration), median cost ×0.94–1.06 across burst / DoT / concentration / rune, and
+concentration per tier at 1.00 / 0.93 / 1.00 damage, 0.94–1.00 / 0.97–1.09 / 1.02 cost
+(Novice / Adept / Master) — on two independent Mysticism lists. Runes keep ×1.00-ish cost while
+their damage reads the vanilla rune premium (×2 aimed, measurable only at Apprentice) against the
+pack's own high-tier ratio (×1.15–1.30). Self-area fields rest on the thinnest data in the model
+(one corpus spell, Firestorm). NPC/summon/proc spells are normalized rather than reproduced, and
+`verify.py` reports them separately; hazard payloads, cloak token costs, conditional-damage
+spells and non-damage spells report as untouched instead of re-priced ×4–×21 (or zeroed).
 
 ## License
 
