@@ -22,6 +22,27 @@ consistent across hundreds of spells. Crucially, a spell's magicka cost, damage,
 together. That makes the vanilla corpus an over-determined system you can *fit*, then move
 each pack onto. This tool does that fitting and moving.
 
+## Baselining against overhaul lists (Requiem, Simonrim, …)
+
+By default the reference curve comes from `Skyrim.esm`. On a list whose overhaul **rewrites the vanilla
+spells** (Requiem, Mysticism/Simonrim, …) that is the wrong target — balancing to unmodded vanilla
+would leave added spells underpowered next to everything else on the list.
+
+Point it at the load order instead and the baseline is rebuilt from the **winning version of each
+vanilla spell**, i.e. the overhaul's own scale:
+
+```sh
+python3 spell_balance.py --data "<list>/Game Root/Data" \
+                         --mods "<list>/mods" \
+                         --order "<list>/profiles/<profile>/loadorder.txt" \
+                         --dry  "<list>/mods/Some Pack/SomePack.esp"
+```
+
+It reports how much of the baseline actually moved, e.g.
+`baseline: 827 vanilla spells, 440 overridden by the load order`.
+A sanity check worth doing: run the overhaul's own plugin through it — a mod that *is* the baseline
+should come back at `x1.00`.
+
 ## How the balance is derived (the math)
 
 Everything below is measured from `Skyrim.esm` at runtime — nothing is hand-tuned.
@@ -51,6 +72,24 @@ Everything below is measured from `Skyrim.esm` at runtime — nothing is hand-tu
 
 Because damage is now vanilla-scale, cost lands in vanilla range on its own — there are no
 arbitrary caps.
+
+### Rank, cost and damage are solved together
+
+Damage is pinned on **delivered damage**, which is archetype-correct: concentration magnitude is a
+per-second *rate* (its cost is per-second too), everything else delivers `magnitude x duration`, summed
+over all damage effects so riders count. That one quantity is stable whether a baseline scales its
+spells by magnitude (vanilla) or by duration (Mysticism scales DoTs this way — a master DoT ticks the
+same but lasts longer).
+
+Magicka cost is then **solved from the same relation**, not derived afterwards from the mod's own
+effect base-costs: the tool fits `E(rank, archetype)` = damage-per-magicka from the baseline's winning
+costs, and sets `cost = delivered_damage / E`. DoTs additionally pay a delivery-speed factor, because
+two spells with the same total damage are not equal value if one front-loads it.
+
+> **Caveat — damage-over-time at high rank.** Vanilla contains *no* Adept-or-above DoT damage spells
+> (sample counts print as `dot: [26, 7, 0, 0, 0]`), and most overhauls add few. Those cells are
+> therefore derived rather than measured, and DoT-heavy packs can swing hard on that extrapolation.
+> Check the printed per-tier sample counts before trusting a DoT-heavy result, and prefer `--dry`.
 
 ## Knobs (100 = vanilla)
 
