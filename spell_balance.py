@@ -127,6 +127,7 @@ FIELD_EXPOSE    = 4.0    # seconds a target is realistically inside a wall/hazar
 MIN_N           = 3      # baseline samples a (class,tier) cell needs before it is trusted
 MIN_DOT_N       = 6      # baseline DoT samples needed before the DIAGNOSTIC rate is shown
 DOT_EXP_OVERRIDE = None  # set by --dot-exp
+DOT_COST_BACK   = 0.30   # share of a DoT's delay compensation charged back into its cost
 
 OUT_DIR   = os.environ.get("SPELLBAL_OUT", "./balanced_out")   # dry-run output dir
 # Built-in list (Terminal Destiny). Each: (pristine source, deploy path, display name).
@@ -614,7 +615,17 @@ def balance_plugin(src, curve, ceil, fit, van_low3, knobs):
         if sp['cost']<=0 or key in skip_cost or V0<=0:
             if V0>0 and sp['cost']>0: n_unpriced+=1
             continue
-        vc=(Vstar*(OVR/100)*(TM[tier]/100))/fit['E'][sub][TI[tier]]
+        # A DoT's score credits it EXTRA total damage as delay compensation (dur_eff). The damage
+        # keeps all of it, but the price charges part of it back: the fixed timer is a real
+        # handicap, so the compensation is a discount -- not a free lunch. The charge-back is
+        # (total/score)^DOT_COST_BACK; bursts and concentration have total == score, so it is
+        # exactly 1 for them. Like DOT_EXP itself, the rate is unmeasurable from any vanilla
+        # baseline (zero corpus DoTs) and is calibrated the same documented way: 0.30 is where
+        # Mysticism's own DoT line reproduces at x1.00 on BOTH axes (its DoTs are ~30% more
+        # score-efficient than its bursts, which one exponent alone cannot express).
+        V1=score(effs, sp['castType'], sp['delivery'], 1.0)
+        sur=(V1/V0)**DOT_COST_BACK if V1>V0 else 1.0
+        vc=(Vstar*sur*(OVR/100)*(TM[tier]/100))/fit['E'][sub][TI[tier]]
         vc*=(OVR/100)*(TC[tier]/100)
         vc=min(vc, ceil[(tier, cls)])
         newcost=max(int(round(vc)),0)
