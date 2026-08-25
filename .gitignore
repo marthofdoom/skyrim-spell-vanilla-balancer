@@ -3,3 +3,7 @@ __pycache__/
 balanced_out/
 *.bak
 Data/
+notes/
+__pycache__/
+balanced_out/
+*.pyc
