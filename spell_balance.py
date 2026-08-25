@@ -575,7 +575,7 @@ def balance_plugin(src, curve, ceil, fit, van_low3, knobs):
     def rec_key(fid):
         hi=fid>>24
         return ((masters[hi] if hi<len(masters) else own_name), fid & 0xFFFFFF)
-    n_mag=n_cost=n_unpriced=n_comp=n_haz=0; dmg_ratios=[]
+    n_mag=n_cost=n_unpriced=n_comp=n_haz=n_cond=0; dmg_ratios=[]
     for r in S.iter_top_records(buf,{b'SPEL'}):
         if r.comp:
             # A zlib-compressed SPEL cannot be edited fixed-width in place: the parsed offsets
@@ -592,6 +592,14 @@ def balance_plugin(src, curve, ceil, fit, van_low3, knobs):
             # 2026-08-24: hazards and traps are excluded entirely.)
             n_haz+=1; continue
         effs=[(res(e['mgef']),e) for e in sp['effects']]
+        # Conditional damage (sun / anti-undead / vampiric lines: a damage effect gated on the
+        # victim's identity or a caster perk, see spell_lib._VICTIM_CLASS_FN) is deliberately not
+        # rewritten. The corpus fit excludes these spells because niche damage cannot price the
+        # general economy -- and by the same token the general economy cannot price THEM: pinning
+        # a sun spell to the general curve just strips the premium its author paid for the niche.
+        # The tool does not touch what it cannot measure.
+        if any(S.is_damage(m) and m.get('cond') for m,e in effs):
+            n_cond+=1; continue
         tier=classify_tier(effs); cls=spell_class(sp['castType'])
         sub=subcat(sp['castType'], sp['delivery'])
         # ONE solve for burst, DoT and concentration alike: pin the spell's SCORE to the baseline's
@@ -640,7 +648,7 @@ def balance_plugin(src, curve, ceil, fit, van_low3, knobs):
             struct.pack_into('<I', buf, r.data_off+sp['spit_off']+4, sp['flags']|S.SPIT_FLAG_MANUAL_COST)
             n_cost+=1
     med_ratio=statistics.median(dmg_ratios) if dmg_ratios else 1.0
-    return bytes(buf), med_ratio, n_mag, n_cost, len(dmg_ratios), n_unpriced, n_comp, n_haz
+    return bytes(buf), med_ratio, n_mag, n_cost, len(dmg_ratios), n_unpriced, n_comp, n_haz, n_cond
 
 def main():
     global VANILLA_DATA
@@ -689,7 +697,7 @@ def main():
         read_from = src
         if os.path.abspath(src)==os.path.abspath(deploy) and os.path.exists(deploy+'.bak'):
             read_from = deploy+'.bak'
-        out, med_ratio, nm, nc, ndmg, nunp, ncomp, nhaz = balance_plugin(read_from, curve, ceil, fit, van_low3, knobs)
+        out, med_ratio, nm, nc, ndmg, nunp, ncomp, nhaz, ncond = balance_plugin(read_from, curve, ceil, fit, van_low3, knobs)
         open(os.path.join(OUT_DIR, os.path.basename(src)),'wb').write(out)
         if a.deploy and not a.dry:
             if os.path.abspath(src)==os.path.abspath(deploy) and not os.path.exists(deploy+'.bak'):
@@ -698,8 +706,9 @@ def main():
         fresh = "" if read_from==src else "  [re-read pristine .bak]"
         unp = f"  ({nunp} proc/cloak: damage pinned, token cost kept)" if nunp else ""
         haz = f"  [{nhaz} hazard/trap payloads skipped]" if nhaz else ""
+        cond_note = f"  [{ncond} conditional-damage kept as authored]" if ncond else ""
         cmp_note = f"  [{ncomp} compressed SPEL skipped]" if ncomp else ""
-        print(f"  {name:18} {ndmg:5}  {nm:5} {nc:4}   ×{med_ratio:.2f}{haz}{unp}{cmp_note}{fresh}")
+        print(f"  {name:18} {ndmg:5}  {nm:5} {nc:4}   ×{med_ratio:.2f}{haz}{cond_note}{unp}{cmp_note}{fresh}")
         tot_m+=nm; tot_c+=nc
     mode = "DEPLOYED" if (a.deploy and not a.dry) else "dry-run (OUT_DIR only)"
     print(f"\nTOTAL magΔ={tot_m} costΔ={tot_c}  [{mode}]  OVERALL={a.overall} VARIETY={a.variety}")

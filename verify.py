@@ -56,6 +56,8 @@ def main():
             tier = B.classify_tier(effs)
             if k in full:
                 out[r.formid] = (sp['edid'], 'SKIP:hazard', tier, sp['cost'], 0.0); continue
+            if any(S.is_damage(m) and m.get('cond') for m, e in effs):
+                out[r.formid] = (sp['edid'], 'SKIP:conditional', tier, sp['cost'], 0.0); continue
             if B.has_damage(effs):
                 d = max(e['dur'] for m, e in effs if S.is_damage(m) and e['mag'] > 0)
                 cls = B.spell_class(sp['castType'])
@@ -81,7 +83,7 @@ def main():
 
     CATS = ['burst','per-target DoT','conc','field/hazard','rune',
             'burst (npc)','per-target DoT (npc)','conc (npc)','field/hazard (npc)','rune (npc)',
-            'cloak/proc','non-damage','SKIP:hazard']
+            'cloak/proc','non-damage','SKIP:hazard','SKIP:conditional']
     for pl in PLUGS:
         buf = open(pl, 'rb').read()
         res = B.build_resolver(S.masters(buf), S.read_mgef_map(buf), v)
