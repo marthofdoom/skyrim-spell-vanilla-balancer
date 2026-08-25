@@ -52,12 +52,22 @@ masters: a winning vanilla-spell override whose damage effects live in the overh
 Everything below is measured from the baseline at runtime — with one stated exception, called
 out explicitly.
 
-### One idea: equal magicka buys equal damage, within a tier
+### The corpus: only spells the design sells
 
-A spell is bought with magicka and paid out in damage. At a given rank the exchange rate is a
-single number, `E(tier)`, and **how** the damage arrives doesn't change what it cost to buy. So
-every spell is scored on one axis and burst, damage-over-time and concentration become directly
-comparable — there is no separate curve per delivery style to populate:
+The baseline is fit **only from tome-taught spells** — the ones a spell tome (`BOOK` record)
+teaches. That is the structural marker for "priced by the design": every vanilla player spell has
+a tome, and no trap, hazard, creature attack, shout or quest spell does. It matters more than it
+sounds: most of the vanilla damage-spell pool is *not* player spells (`crChaurusPoisonSpit02`:
+49 damage for 3 magicka), and at some tiers the junk is the whole pool — vanilla's Novice
+fire-and-forget cell is 100% traps/hazards/spit. Fitting on that pool is what silently skewed
+earlier versions' costs. Conditional damage (sun/anti-undead effects carrying `CTDA` conditions)
+is excluded from the fit too: real spells, but priced for a damage clause that only sometimes
+applies.
+
+### One idea: a spell's score, comparable across delivery styles
+
+A spell is bought with magicka and paid out in damage, and every spell is scored on one axis so
+burst, damage-over-time and concentration become directly comparable:
 
 | delivery | score | why |
 |---|---|---|
@@ -71,6 +81,23 @@ illusion "fear level", magicka drain and other utility magnitudes — and it exc
 Sparks read 208 damage instead of 8 and flipped every vanilla shock spell (Sparks, Lightning
 Bolt, Chain Lightning, Thunderbolt, Wall of Storms, Lightning Storm) into the DoT bucket.
 
+### Pricing: what a magicka buys depends on how the damage arrives
+
+Within a tier the exchange rate is measured per **delivery family**, because the vanilla design
+prices delivery itself: at Apprentice an aimed bolt buys ~0.5 damage per magicka, a rune ~0.19,
+and Firestorm ~0.07. The families are structural (cast type + delivery field):
+
+- **aimed** (projectile / on-target) — the dense family; per-tier median efficiency.
+- **loc** (placed at a location: runes, placed fields) and **self** (area around the caster:
+  Firestorm, novas) — aimed efficiency times one pooled, measured ratio each (vanilla: both ~0.3×;
+  overhauls move it, so it is re-measured per baseline).
+- **concentration** — its own two-anchor efficiency line (below).
+
+Damage targets use the same family split (aimed medians; loc/self by measured ratio; conc its own
+line). A single pooled exchange rate — what earlier versions used — made every family's cost
+drift toward whatever mix of deliveries its tier happened to contain, and over-charged Master
+concentration ~2.5× into the cost ceiling.
+
 ### Why this is what makes DoT balance possible
 
 Vanilla contains **zero player damage-over-time spells**. Not few — zero. Every duration-bearing
@@ -81,76 +108,76 @@ imbalance. That was the flaw in earlier versions — the same pack could read ×
 ×1.58 the other.
 
 Here **nothing about a DoT is sourced from other DoTs.** It is priced off the same dense
-`E(tier)` as every burst, and the only DoT-specific quantity is a single global constant shared
-by all five tiers, so no cell can be defined by one sample.
+aimed curve as every burst, and the only DoT-specific quantity is a single global constant shared
+by all five tiers, so no cell can be defined by one sample. On the cost side a DoT keeps its
+delay compensation in damage but is charged **part of it back** in magicka
+(`× (total/score)^0.4`, between pricing the score and pricing the total damage): the timer is a
+real handicap, so the compensation is a discount — not a free lunch, and the strongest available
+reference agrees (calibrated jointly with `DOT_EXP`, Mysticism's own tome poison line reproduces
+at ×1.00 damage and ×1.01 cost).
 
-### Concentration, same trick
+### Concentration: a two-anchor line through the design's own dps
 
-Concentration is as data-starved as DoT, for the same structural reason: vanilla has exactly three
-player concentration damage spells (Flames, Frostbite, Sparks — all Novice). **Apprentice and Adept
-have zero samples on every baseline tested**, and the higher cells that do exist are the Wall
-spells, which are famously underpowered. Per-cell, the curve came out nearly flat (`8/9/11/11/11`),
-which crushed any high-tier concentration spell a pack added.
-
-It doesn't need per-tier samples either. Both classes are bought with the same magicka at the same
-rank, so the whole concentration curve is the **dense** fire-and-forget curve times a measured
-conc/fnf ratio. That ratio is not one constant — it **rises with tier**, and vanilla says so
-itself: Flames deals 8/sec at Novice (~0.38 of a Novice burst), Lightning Storm deals 75/sec at
-Master against Firestorm's 100 burst. Bethesda's own magic-effect pricing agrees structurally —
-the fire-and-forget damage effects' base cost climbs with tier (which is exactly why burst
-damage-per-magicka falls) while the concentration effects' stays flat — so concentration keeps
-its exchange rate while burst pays a rising premium, and the damage ratio between them widens.
-
-The ratio is fit as a geometric line through the only two honest anchors any baseline has:
+Concentration is as data-starved as DoT, for the same structural reason: the corpus has player
+concentration damage at exactly two places on every baseline — the Novice line (Flames,
+Frostbite, Sparks, as re-priced by whatever overhaul wins them) and **Lightning Storm** at
+Master, the only high-tier player concentration spell Bethesda ever shipped. The concentration
+curve is the geometric line through those two anchors:
 
 ```
-k(t) = k_lo × g^(t − lo)        g = (k_hi / k_lo)^(1/(hi−lo)),  clamped to [1, 1.5] per tier
-P(conc, t) = k(t) × P(fnf, t)
+conc(t) = c_lo × g^(t − lo)        g = (c_hi / c_lo)^(1/(hi−lo))
 ```
 
-`lo` is the lowest tier with a real sample mass (Novice, ~50 spells: the intercept); `hi` is the
-highest tier with any concentration sample — in practice the list's winning **Lightning Storm**,
-the only high-tier player concentration spell Bethesda ever shipped, re-valued by whatever
-overhaul wins it. The interior sampled cells are deliberately not fit: on every baseline examined
-they are the Wall spells, whose recorded magnitude is only the spray tip (the real damage is the
-hazard the wall leaves, invisible to the spell record — the engine prices ~8× more damage into
-their base cost than their magnitude shows), and fitting them would flip the slope negative.
+The interior sampled cells are deliberately not fit: on every baseline examined they are the Wall
+spells, whose recorded magnitude is only the spray tip — the real damage is the hazard the wall
+leaves, invisible to the spell record (the engine prices ~8× more damage into their base cost
+than their magnitude shows; and there is no structural marker that could separate them, verified:
+archetype and associated-item fields match honest damage effects). Guards: a top anchor that does
+not rise above the intercept (the wall signature), or that claims more sustained dps than an
+equal-tier burst's whole payout per second, is not trusted — the curve then inherits the aimed
+curve's shape through the intercept instead. The per-tier rise is capped at ×2.0 (vanilla's own
+line is ×1.75: 8 → 75 dps). Thin anchors are *named* in the printout.
 
-Three guards bound what a junk top anchor can do: a *falling* anchor drops the slope entirely; a
-rising one is clamped to ×1.5/tier; and an anchor claiming a ratio above **1.0** (sustained dps
-outbuying an equal-tier burst's whole payout, every second — no design does that; vanilla's own
-maximum is 0.83) is rejected as junk. In each fallback case the curve uses the constant instead —
-the **low-tier mass median**, not the whole-pool median, since the pool contains the same wall
-contamination the fit excludes. Thin anchors are *named* in the printout so you can see exactly
-which spell is driving the slope.
-
-Everything is measured per baseline: unmodded vanilla rises 0.38 → 0.83 (×1.22/tier — the derived
-Master target is 75 dps, Lightning Storm itself), a Simonrim list 0.35 → 0.67 (×1.17/tier — and
-the fit's interpolated Adept ratio, 0.48, lands within 4% of the 0.50 Mysticism's own conc line
-uses), Requiem stays at its constant 0.51: its winning Lightning Storm measures 0.43 against its
-own unusually strong Novice line, so the slope is genuinely absent there — measured absent, not
-missing.
+Concentration **cost** gets the same treatment: a dps-per-magicka/s line through the same two
+anchors. This is measured per baseline — unmodded vanilla is nearly flat (0.50 → 0.54: Lightning
+Storm keeps Novice efficiency), a Mysticism list falls ×0.84/tier (0.44 → 0.22), Requiem falls
+×0.76/tier (0.40 → 0.13). The single shared exchange rate this replaces priced Master
+concentration against burst efficiency and over-charged it ~2.5× into the cost ceiling.
 
 ### Spells nobody casts
 
-A record with **cost 0** isn't a spell the player casts and pays for — it's the damage component of
-a cloak, a proc or a scripted ability, and its parent does the paying. Vanilla has 13; some packs
-are up to 78% them. They're excluded from the baseline fit (they have no cost, so no efficiency,
-and they sit at whatever magnitude their parent wanted). Their *damage* is still pinned like
-anything else — vanilla's own Flame Cloak sits exactly on the Novice concentration curve, so the
-comparison is honest — but no magicka cost is written onto them.
+Three structural markers identify records that look like spells but are never cast and paid for
+by an actor, and each gets exactly the treatment its evidence supports:
+
+- **Hazard payloads** (`HAZD` records name the spell they apply to actors inside the field —
+  walls, blizzards, gas clouds, fire-plate traps): **skipped entirely** — no damage rewrite, no
+  cost rewrite, reported per pack. Their token costs (1, 8, 10 magicka) are never charged by the
+  engine, and their magnitudes are tuned to the field's tick pattern, not to a cast. Earlier
+  versions re-priced them ×4–×21.
+- **Cloak/proc payloads** (a magic effect's associated item names the spell a cloak applies to
+  nearby targets): damage is still pinned — an enemy inside the cloak really takes it, and
+  vanilla's own Flame Cloak sits exactly on the Novice concentration curve — but the token cost
+  is kept, never rewritten.
+- **Cost-0 records** (scripted-ability damage components): as before, damage pinned, no cost
+  invented.
+
+Spells with **no damage at all** (summons, wards, utility) are left completely untouched now: the
+model prices damage and has no opinion on utility spells. (The old autocalc re-costing path also
+zeroed any spell whose effects carry no engine base cost — Transmute went 261 → 0 magicka.)
 
 ### The solve, per spell
 
-1. **Baseline curves** — `P(class, tier)` = median score, `E(tier)` = median score per magicka.
-   Taken from `Skyrim.esm`, or from the **winning** version of each vanilla spell in a load order
-   (`--order`, for lists whose overhaul rewrites vanilla magic).
-2. **Damage** — pin the spell's score to `P` for its own (class, tier), log-blended back toward
+1. **Baseline curves** — per delivery family: `P(family, tier)` = median score, `E(family,
+   tier)` = score per magicka. Taken from the tome-taught corpus of `Skyrim.esm`, or from the
+   **winning** version of each of those spells in a load order (`--order`, for lists whose
+   overhaul rewrites vanilla magic).
+2. **Damage** — pin the spell's score to `P` for its own (family, tier), log-blended back toward
    the author's value by `VARIETY`. Score is *linear* in every magnitude, so the target ratio is
    read straight off and applied to all the spell's damage effects, preserving its structure.
-3. **Cost** — solved from the same relation, `cost = score / E(tier)`. Not derived from the mod's
-   own effect base-costs, which are frequently inflated. A soft per-(tier, class) ceiling guards
-   the rare tail.
+3. **Cost** — `cost = score × (total/score)^0.4 / E(family, tier)` (the second factor is 1 for
+   anything that isn't a DoT). Not derived from the mod's own effect base-costs, which are
+   frequently inflated. A soft per-(tier, class) ceiling, interpolated from the corpus costs,
+   guards the rare tail.
 
 ### The one assumed number
 
@@ -160,15 +187,17 @@ delivering nothing up front: `total = burst_target × dur^(1-DOT_EXP)`.
 | `DOT_EXP` | 10s DoT gets | 30s DoT gets |
 |---|---|---|
 | `1.00` | 1.0× a burst's total | 1.0× |
-| `0.70` (default) | 2.0× | 2.7× |
+| `0.75` (default) | 1.8× | 2.3× |
+| `0.70` | 2.0× | 2.7× |
 | `0.50` | 3.2× | 5.5× |
 
 This is the only number in the model that is asserted rather than measured, because **no baseline
-can identify it** — see above. The default sits where Mysticism's own poison line sits, i.e. it
-makes Mysticism reproduce itself at ×1.00. Poison is the most situational damage type in the game
-(resisted; immune on undead and automatons), so treat `0.70` as the generous end — a fire DoT
-arguably deserves less compensation, meaning a higher number. Each run prints what the baseline's
-own DoT samples imply, as a diagnostic; adopt it with `--dot-exp` only after reading them.
+can identify it** — see above. The default sits where Mysticism's own poison line sits under the
+tome-taught corpus (damage and cost jointly within a few percent of self-reproduction). Poison is
+the most situational damage type in the game (resisted; immune on undead and automatons), so a
+fire DoT arguably deserves less compensation, meaning a higher number. Each run prints what the
+baseline's own DoT samples imply, as a diagnostic; adopt it with `--dot-exp` only after reading
+them.
 
 Concentration and burst spells are **unaffected** by this knob.
 
@@ -227,30 +256,39 @@ required (though you can point it at a virtual `Data`).
 
 ### 1.0.0 — 2026-08-24
 
-First tagged release. The model change that made it shippable: **all delivery styles are scored
-on one axis** (equal magicka buys equal damage, within a tier).
+First tagged release. Two structural decisions made it shippable: **all delivery styles are
+scored on one axis** (a spell's score), and **everything is fit from — and priced against — the
+spells the design actually sells**.
 
-- `dot` is no longer an archetype. A damage-over-time spell is a fire-and-forget spell scored
+- The baseline corpus is tome-taught player spells only. Traps, hazards, creature attacks, shouts
+  and quest spells (most of the raw pool; at some tiers all of it) never touch the fit, and
+  conditional (sun/anti-undead) damage is excluded from it too.
+- Hazard payload spells (named by `HAZD` records) are skipped entirely — not refit, not
+  re-costed, reported per pack. Cloak/proc payloads keep their token costs; their damage is still
+  pinned. Spells with no damage are left untouched (the old autocalc path zeroed some utility
+  spells' costs).
+- `dot` is not an archetype. A damage-over-time spell is a fire-and-forget spell scored
   `magnitude × dur_eff(duration)`; nothing about a DoT is sourced from other DoTs (vanilla has
-  zero player DoT damage spells, so the old per-(tier, DoT) curve was three-fifths invented).
-  `DOT_EXP` (default 0.70) is the single asserted delay-compensation constant — every other
-  number is measured from the baseline at runtime.
-- The concentration curve is `k(t) × P(fnf, t)`, with `k(t)` a geometric line through the two
-  honest anchors (the Novice mass and the list's winning Lightning Storm), guarded against junk
-  anchors and falling back to the low-tier-mass constant.
+  zero player DoT damage spells). `DOT_EXP` (default 0.75) and the cost charge-back
+  `DOT_COST_BACK` (0.40, `cost × (total/score)^0.4`) are the two asserted DoT constants,
+  calibrated jointly — every other number is measured from the baseline at runtime.
+- Costs are priced per delivery family (aimed / placed / self-area / concentration), each
+  family's efficiency measured from the corpus; concentration damage **and** cost are two-anchor
+  geometric lines through the Novice mass and the list's winning Lightning Storm, guarded against
+  junk anchors (walls).
 - Magic-effect references resolve across the whole load order, so overhaul-owned effects
   (Requiem's spells) are measured instead of silently dropped.
 - Damage requires a *priced* effect (`basecost > 0`): vanilla's zero-cost `PerkDisintegrate*`
   riders no longer read as 200 damage or flip shock spells into DoTs.
 - Field spells (walls, hazards, cloaks, auras) credit at most `FIELD_EXPOSE` seconds of exposure.
-- Cost-0 records (cloak/proc/scripted-ability components) are excluded from the baseline fit and
-  never have a cost written onto them; their damage is still pinned.
 - In-place re-runs re-read the pristine `.bak`, so tuning never compounds.
 - Compressed SPEL records are skipped and reported instead of risked.
 
-Validated by self-consistency: with a Mysticism (Simonrim) list as baseline, Mysticism itself
-reproduces at ×1.00 in all four delivery styles (concentration / burst / per-target DoT /
-field), and per-tier concentration at 1.00 / 0.98 / 1.00 (Novice / Adept / Master).
+Validated by self-consistency on damage **and cost**: with a Mysticism (Simonrim) list as
+baseline, Mysticism itself reproduces at ×1.00 median damage in every delivery category, and
+×0.97–1.03 median cost per category (burst / DoT / concentration / field / rune), with
+concentration per tier at 1.00 / 1.03 / 1.05 (Novice / Adept / Master) on cost and
+1.00 / 0.93 / 1.00 on damage. Hazard payloads report as skipped instead of re-priced ×4–×21.
 
 ## License
 

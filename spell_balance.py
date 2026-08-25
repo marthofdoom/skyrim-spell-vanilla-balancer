@@ -102,8 +102,8 @@ COST_CEIL_HEADROOM = 1.5            # soft cost clamp = vanilla tier max cost * 
 # the player wait out a timer the SPELL fixed for them, so it is paid more total damage than an
 # equal-cost burst as compensation:  total = burst_target * dur^(1-DOT_EXP)
 #   1.00 -> no compensation: equal magicka buys equal TOTAL damage, however slowly it lands
-#   0.70 -> a 10s DoT gets 2.0x a burst's total, a 30s DoT 2.7x
-#   0.60 -> a 10s DoT gets 2.5x, a 30s DoT 3.9x
+#   0.75 -> a 10s DoT gets 1.8x a burst's total, a 30s DoT 2.3x
+#   0.70 -> a 10s DoT gets 2.0x, a 30s DoT 2.7x
 # Concentration and burst spells are unaffected by it.
 #
 # This is the ONE number in the model asserted rather than measured, because no baseline can
@@ -114,20 +114,25 @@ COST_CEIL_HEADROOM = 1.5            # soft cost clamp = vanilla tier max cost * 
 # reading the samples, and do not wire it back in as the driver: a per-list fit would make a
 # universal tool inherit whatever junk each baseline happens to contain.
 #
-# 0.60 is where Mysticism's own poison line sits against the honest tome-corpus curve, i.e. it
-# makes Mysticism's DoTs reproduce at x1.00 under the self-consistency test. (The old default of
-# 0.70 was the same calibration run against a curve inflated by trap/hazard junk.) Poison is the
-# most situational damage type in the game (resisted; immune on undead and automatons), so treat
-# 0.60 as the GENEROUS end -- a fire DoT arguably deserves less compensation, a higher number.
-# Known residual, unmeasurable from any vanilla baseline (zero corpus DoTs): Mysticism prices its
-# DoTs ~25-30% more score-efficient than its bursts, so no single exponent reproduces its damage
-# AND its cost at once; 0.60 reproduces damage exactly and leaves DoT costs ~x0.76 (generous).
-DOT_EXP_DEFAULT = 0.60
+# 0.75 is where Mysticism's own poison line sits against the honest tome-corpus curve: measured
+# on its 10 tome-taught per-target DoTs, damage reproduces at exactly x1.00 (0.70, the old
+# default, was the same calibration run against a curve inflated by trap/hazard junk and now
+# reads x1.08; 0.60 reads x1.26). Poison is the most situational damage type in the game
+# (resisted; immune on undead and automatons), so treat 0.75 as the generous end -- a fire DoT
+# arguably deserves less compensation, a higher number.
+# The COST side has its own dial, DOT_COST_BACK below: the author charges a DoT for part of its
+# delay compensation instead of granting it free (Mysticism's DoTs are priced less
+# score-efficient than its bursts, which one exponent alone cannot express). cost multiplies by
+# (total/score)^DOT_COST_BACK -- 1.0 for bursts and concentration. 0.40 is where Mysticism's
+# tome DoT costs reproduce at x1.01 with damage at x1.00; both dials are calibrated jointly on
+# the only per-target DoT line any list in the corpus ships, and both are asserted, not
+# per-list-fit, for the same reason DOT_EXP always was.
+DOT_EXP_DEFAULT = 0.75
 FIELD_EXPOSE    = 4.0    # seconds a target is realistically inside a wall/hazard/aura
 MIN_N           = 3      # baseline samples a (class,tier) cell needs before it is trusted
 MIN_DOT_N       = 6      # baseline DoT samples needed before the DIAGNOSTIC rate is shown
 DOT_EXP_OVERRIDE = None  # set by --dot-exp
-DOT_COST_BACK   = 0.30   # share of a DoT's delay compensation charged back into its cost
+DOT_COST_BACK   = 0.40   # share of a DoT's delay compensation charged back into its cost
 
 OUT_DIR   = os.environ.get("SPELLBAL_OUT", "./balanced_out")   # dry-run output dir
 # Built-in list (Terminal Destiny). Each: (pristine source, deploy path, display name).
@@ -620,9 +625,10 @@ def balance_plugin(src, curve, ceil, fit, van_low3, knobs):
         # handicap, so the compensation is a discount -- not a free lunch. The charge-back is
         # (total/score)^DOT_COST_BACK; bursts and concentration have total == score, so it is
         # exactly 1 for them. Like DOT_EXP itself, the rate is unmeasurable from any vanilla
-        # baseline (zero corpus DoTs) and is calibrated the same documented way: 0.30 is where
-        # Mysticism's own DoT line reproduces at x1.00 on BOTH axes (its DoTs are ~30% more
-        # score-efficient than its bursts, which one exponent alone cannot express).
+        # baseline (zero corpus DoTs) and is calibrated the same documented way, jointly with
+        # DOT_EXP: at (0.75, 0.40) Mysticism's tome DoT line reproduces at x1.00 damage and
+        # x1.01 cost (its DoTs are priced less score-efficient than its bursts, which one
+        # exponent alone cannot express).
         V1=score(effs, sp['castType'], sp['delivery'], 1.0)
         sur=(V1/V0)**DOT_COST_BACK if V1>V0 else 1.0
         vc=(Vstar*sur*(OVR/100)*(TM[tier]/100))/fit['E'][sub][TI[tier]]
